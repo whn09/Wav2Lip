@@ -40,6 +40,7 @@ syncnet_mel_step_size = 16
 class Dataset(object):
     def __init__(self, split):
         self.all_videos = get_image_list(args.data_root, split)
+        # print('self.all_videos:', len(self.all_videos))
 
     def get_frame_id(self, frame):
         return int(basename(frame).split('.')[0])
@@ -111,8 +112,11 @@ class Dataset(object):
     def __getitem__(self, idx):
         while 1:
             idx = random.randint(0, len(self.all_videos) - 1)
+            # print('idx:', idx)
             vidname = self.all_videos[idx]
+            # print('vidname:', vidname)
             img_names = list(glob(join(vidname, '*.jpg')))
+            # print('img_names:', len(img_names))
             if len(img_names) <= 3 * syncnet_T:
                 continue
             
