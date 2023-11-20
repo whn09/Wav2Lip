@@ -1,19 +1,15 @@
-from os import listdir, path
 import numpy as np
 import scipy, cv2, os, sys, argparse
-import audio
 import json, subprocess, random, string
-from tqdm import tqdm
+# from tqdm import tqdm
 from glob import glob
 import torch, face_detection
 from models import Wav2Lip
+import audio
 import platform
-import time
 
+import time
 import boto3
-from io import BytesIO
-import librosa
-import wave
 
 
 parser = argparse.ArgumentParser(description='Inference code to lip-sync videos in the wild using Wav2Lip models')
@@ -264,36 +260,14 @@ def main():
         mel = audio.melspectrogram(wav)
         # print('mel.shape:', mel.shape)
 
-        # 创建一个新的 WAV 文件
-        with wave.open('temp/'+args.outfile.split('/')[-1][:-4]+'_chunk_{}.wav'.format(chunk_num), 'w') as wav_file:
-            # 设置音频参数
-            # nchannels：声道数，这里设为1，表示单声道
-            # sampwidth：每个样本的字节数，这里设为2，表示16位PCM
-            # framerate：采样率，这里设为16000，表示16kHz
-            wav_file.setnchannels(1)
-            wav_file.setsampwidth(2)
-            wav_file.setframerate(16000)
-
-            # 写入 PCM 数据
-            wav_file.writeframes(chunk)
+        audio.save_wav(chunk_array, 'temp/'+args.outfile.split('/')[-1][:-4]+'_chunk_{}.wav'.format(chunk_num), 16000)
     
     # # 将 PCM 数据转换为 numpy 数组
     # pcm_array = np.frombuffer(pcm_data, dtype=np.int16).astype(np.float32)
     # # 将 PCM 数据范围从 [-32768, 32767] 转换为 [-1.0, 1.0]
     # pcm_array /= 32768.0
-    
-    # # 创建一个新的 WAV 文件
-    # with wave.open('temp/output.wav', 'w') as wav_file:
-    #     # 设置音频参数
-    #     # nchannels：声道数，这里设为1，表示单声道
-    #     # sampwidth：每个样本的字节数，这里设为2，表示16位PCM
-    #     # framerate：采样率，这里设为16000，表示16kHz
-    #     wav_file.setnchannels(1)
-    #     wav_file.setsampwidth(2)
-    #     wav_file.setframerate(16000)
 
-    #     # 写入 PCM 数据
-    #     wav_file.writeframes(pcm_data)
+    # audio.save_wav(chunk_array, 'temp/output.wav', 16000)
 
     # # wav = audio.load_wav('temp/output.wav', 16000)
     # wav = pcm_array
