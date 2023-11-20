@@ -16,7 +16,7 @@ if __name__ == '__main__':
     if_parallel = True
 
     # 需要执行的命令列表
-    base_command = "python inference.py --checkpoint_path ./checkpoints/wav2lip.pth --face ../inputs/train_close_mouth_480p.mp4 --audio ../inputs/test.wav --face_det_batch_size 1 --wav2lip_batch_size 1 --outfile results/result_voice_{}.mp4"
+    base_command = "python inference.py --checkpoint_path ./checkpoints/wav2lip_gan.pth --face ../inputs/train_close_mouth_480p.mp4 --audio ../inputs/test.wav --face_det_batch_size 1 --wav2lip_batch_size 1 --outfile results/result_voice_{}.mp4"
     # base_command = "python inference.py --checkpoint_path ./savedmodel/checkpoint_step000410000.pth --face ../inputs/train_close_mouth_480p.mp4 --audio ../inputs/test.wav --face_det_batch_size 1 --wav2lip_batch_size 1 --outfile results/result_voice_savedmodel_{}.mp4"
     num_threads = 8
 
