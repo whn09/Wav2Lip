@@ -1,6 +1,7 @@
 from os import listdir, path
 import numpy as np
-import scipy, cv2, os, sys, argparse, audio
+import scipy, cv2, os, sys, argparse
+import audio
 import json, subprocess, random, string
 from tqdm import tqdm
 from glob import glob
@@ -86,13 +87,14 @@ def face_detect(images):
     while 1:
         predictions = []
         try:
-            for i in tqdm(range(0, len(images), batch_size)):
+            # for i in tqdm(range(0, len(images), batch_size)):
+            for i in range(0, len(images), batch_size):
                 predictions.extend(detector.get_detections_for_batch(np.array(images[i:i + batch_size])))
         except RuntimeError:
             if batch_size == 1: 
                 raise RuntimeError('Image too big to run face detection on GPU. Please use the --resize_factor argument')
             batch_size //= 2
-            print('Recovering from OOM error; New batch size: {}'.format(batch_size))
+            # print('Recovering from OOM error; New batch size: {}'.format(batch_size))
             continue
         break
 
@@ -117,25 +119,25 @@ def face_detect(images):
     del detector
     return results 
 
-def datagen(frames, mels):
+def datagen(frames, face_det_results, mels):
     img_batch, mel_batch, frame_batch, coords_batch = [], [], [], []
 
-    if args.box[0] == -1:
-        if not args.static:
-            face_det_results = face_detect(frames) # BGR2RGB for CNN face detection
-        else:
-            face_det_results = face_detect([frames[0]])
-    else:
-        print('Using the specified bounding box instead of face detection...')
-        y1, y2, x1, x2 = args.box
-        face_det_results = [[f[y1: y2, x1:x2], (y1, y2, x1, x2)] for f in frames]
+    # if args.box[0] == -1:
+    #     if not args.static:
+    #         face_det_results = face_detect(frames) # BGR2RGB for CNN face detection
+    #     else:
+    #         face_det_results = face_detect([frames[0]])
+    # else:
+    #     print('Using the specified bounding box instead of face detection...')
+    #     y1, y2, x1, x2 = args.box
+    #     face_det_results = [[f[y1: y2, x1:x2], (y1, y2, x1, x2)] for f in frames]
 
     for i, m in enumerate(mels):
         idx = 0 if args.static else i%len(frames)
         frame_to_save = frames[idx].copy()
         face, coords = face_det_results[idx].copy()
 
-        face = cv2.resize(face, (args.img_size, args.img_size))
+        # face = cv2.resize(face, (args.img_size, args.img_size))
             
         img_batch.append(face)
         mel_batch.append(m)
@@ -167,7 +169,7 @@ def datagen(frames, mels):
 
 mel_step_size = 16
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
-print('Using {} for inference.'.format(device))
+# print('Using {} for inference.'.format(device))
 
 def _load(checkpoint_path):
     if device == 'cuda':
@@ -179,7 +181,7 @@ def _load(checkpoint_path):
 
 def load_model(path):
     model = Wav2Lip()
-    print("Load checkpoint from: {}".format(path))
+    # print("Load checkpoint from: {}".format(path))
     checkpoint = _load(path)
     s = checkpoint["state_dict"]
     new_s = {}
@@ -202,7 +204,7 @@ def main():
         video_stream = cv2.VideoCapture(args.face)
         fps = video_stream.get(cv2.CAP_PROP_FPS)
 
-        print('Reading video frames...')
+        # print('Reading video frames...')
 
         full_frames = []
         while 1:
@@ -224,7 +226,11 @@ def main():
 
             full_frames.append(frame)
 
-    print ("Number of frames available for inference: "+str(len(full_frames)))
+    # print ("Number of frames available for inference: "+str(len(full_frames)))
+
+    face_det_results = face_detect(full_frames)
+    for i in range(len(face_det_results)):
+        face_det_results[i][0] = cv2.resize(face_det_results[i][0], (args.img_size, args.img_size))
 
     # if not args.audio.endswith('.wav'):
     #     print('Extracting raw audio...')
@@ -233,106 +239,133 @@ def main():
     #     subprocess.call(command, shell=True)
     #     args.audio = 'temp/temp.wav'
 
+    model = load_model(args.checkpoint_path)
+    # print ("Model loaded")
+
     response = polly_client.synthesize_speech(VoiceId='Matthew',  # Joanna: Female, Matthew: Male
                     OutputFormat='pcm', 
                     Text = args.text)
                     
     pcm_stream = response['AudioStream']
     pcm_data = b''
+    chunk_num = 0
+    all_start_time = time.time()
     while True:
-        chunk = pcm_stream.read(1024)
+        chunk = pcm_stream.read(6096)
         if not chunk:
             break
         pcm_data += chunk
 
-        # # 将 PCM 数据转换为 numpy 数组
-        # chunk_array = np.frombuffer(chunk, dtype=np.int16).astype(np.float32)
-        # # 将 PCM 数据范围从 [-32768, 32767] 转换为 [-1.0, 1.0]
-        # pcm_array /= 32768.0
+        # 将 PCM 数据转换为 numpy 数组
+        chunk_array = np.frombuffer(chunk, dtype=np.int16).astype(np.float32)
+        # 将 PCM 数据范围从 [-32768, 32767] 转换为 [-1.0, 1.0]
+        chunk_array /= 32768.0
+        wav = chunk_array
+        mel = audio.melspectrogram(wav)
+        # print('mel.shape:', mel.shape)
+
+        # 创建一个新的 WAV 文件
+        with wave.open('temp/'+args.outfile.split('/')[-1][:-4]+'_chunk_{}.wav'.format(chunk_num), 'w') as wav_file:
+            # 设置音频参数
+            # nchannels：声道数，这里设为1，表示单声道
+            # sampwidth：每个样本的字节数，这里设为2，表示16位PCM
+            # framerate：采样率，这里设为16000，表示16kHz
+            wav_file.setnchannels(1)
+            wav_file.setsampwidth(2)
+            wav_file.setframerate(16000)
+
+            # 写入 PCM 数据
+            wav_file.writeframes(chunk)
     
-    # 将 PCM 数据转换为 numpy 数组
-    pcm_array = np.frombuffer(pcm_data, dtype=np.int16).astype(np.float32)
-    # 将 PCM 数据范围从 [-32768, 32767] 转换为 [-1.0, 1.0]
-    pcm_array /= 32768.0
+    # # 将 PCM 数据转换为 numpy 数组
+    # pcm_array = np.frombuffer(pcm_data, dtype=np.int16).astype(np.float32)
+    # # 将 PCM 数据范围从 [-32768, 32767] 转换为 [-1.0, 1.0]
+    # pcm_array /= 32768.0
     
-    # 创建一个新的 WAV 文件
-    with wave.open('temp/output.wav', 'w') as wav_file:
-        # 设置音频参数
-        # nchannels：声道数，这里设为1，表示单声道
-        # sampwidth：每个样本的字节数，这里设为2，表示16位PCM
-        # framerate：采样率，这里设为16000，表示16kHz
-        wav_file.setnchannels(1)
-        wav_file.setsampwidth(2)
-        wav_file.setframerate(16000)
+    # # 创建一个新的 WAV 文件
+    # with wave.open('temp/output.wav', 'w') as wav_file:
+    #     # 设置音频参数
+    #     # nchannels：声道数，这里设为1，表示单声道
+    #     # sampwidth：每个样本的字节数，这里设为2，表示16位PCM
+    #     # framerate：采样率，这里设为16000，表示16kHz
+    #     wav_file.setnchannels(1)
+    #     wav_file.setsampwidth(2)
+    #     wav_file.setframerate(16000)
 
-        # 写入 PCM 数据
-        wav_file.writeframes(pcm_data)
+    #     # 写入 PCM 数据
+    #     wav_file.writeframes(pcm_data)
 
-    # wav = audio.load_wav('temp/output.wav', 16000)
-    wav = pcm_array
-    mel = audio.melspectrogram(wav)
+    # # wav = audio.load_wav('temp/output.wav', 16000)
+    # wav = pcm_array
+    # mel = audio.melspectrogram(wav)
+    # print('mel.shape:', mel.shape)
 
-    print(mel.shape)
+        if np.isnan(mel.reshape(-1)).sum() > 0:
+            raise ValueError('Mel contains nan! Using a TTS voice? Add a small epsilon noise to the wav file and try again')
 
-    if np.isnan(mel.reshape(-1)).sum() > 0:
-        raise ValueError('Mel contains nan! Using a TTS voice? Add a small epsilon noise to the wav file and try again')
+        mel_chunks = []
+        mel_idx_multiplier = 80./fps 
+        i = 0
+        while 1:
+            start_idx = int(i * mel_idx_multiplier)
+            if start_idx + mel_step_size > len(mel[0]):
+                mel_chunks.append(mel[:, len(mel[0]) - mel_step_size:])
+                break
+            mel_chunks.append(mel[:, start_idx : start_idx + mel_step_size])
+            i += 1
 
-    mel_chunks = []
-    mel_idx_multiplier = 80./fps 
-    i = 0
-    while 1:
-        start_idx = int(i * mel_idx_multiplier)
-        if start_idx + mel_step_size > len(mel[0]):
-            mel_chunks.append(mel[:, len(mel[0]) - mel_step_size:])
+        # print("Length of mel chunks: {}".format(len(mel_chunks)))
+
+        if len(mel_chunks) < 2:  # TODO pcm_stream.read(6096)的时候，len(mel_chunks)应该等于2，后面的程序运行都正常，但是最后一点语音可能不到2，导致后面的程序运行失败
             break
-        mel_chunks.append(mel[:, start_idx : start_idx + mel_step_size])
-        i += 1
 
-    print("Length of mel chunks: {}".format(len(mel_chunks)))
+        sub_frames = full_frames[:len(mel_chunks)]  # TODO 暂时每个chunk只取full_frames的前一些帧，而不是顺序取
+        sub_face_det_results = face_det_results[:len(mel_chunks)]
 
-    full_frames = full_frames[:len(mel_chunks)]
+        batch_size = args.wav2lip_batch_size
+        gen = datagen(sub_frames.copy(), sub_face_det_results.copy(), mel_chunks)
 
-    batch_size = args.wav2lip_batch_size
-    gen = datagen(full_frames.copy(), mel_chunks)
+        frame_h, frame_w = sub_frames[0].shape[:-1]
+        # out = cv2.VideoWriter('temp/result.avi', cv2.VideoWriter_fourcc(*'DIVX'), fps, (frame_w, frame_h))
+        out = cv2.VideoWriter('temp/'+args.outfile.split('/')[-1][:-4]+'.avi', cv2.VideoWriter_fourcc(*'DIVX'), fps, (frame_w, frame_h))
 
-    model = load_model(args.checkpoint_path)
-    print ("Model loaded")
+        start_time = time.time()
+        avg_time = 0
+        num_batches = 0
+        # for i, (img_batch, mel_batch, frames, coords) in enumerate(tqdm(gen, 
+        #                                         total=int(np.ceil(float(len(mel_chunks))/batch_size)))):
+        for i, (img_batch, mel_batch, frames, coords) in enumerate(gen):
+            start = time.time()
+            img_batch = torch.FloatTensor(np.transpose(img_batch, (0, 3, 1, 2))).to(device)
+            mel_batch = torch.FloatTensor(np.transpose(mel_batch, (0, 3, 1, 2))).to(device)
+            # print('img_batch:', img_batch.shape, 'mel_batch:', mel_batch.shape)  # img_batch: torch.Size([1, 6, 96, 96]) mel_batch: torch.Size([1, 1, 80, 16])
 
-    frame_h, frame_w = full_frames[0].shape[:-1]
-    out = cv2.VideoWriter('temp/result.avi', cv2.VideoWriter_fourcc(*'DIVX'), fps, (frame_w, frame_h))
+            with torch.no_grad():
+                pred = model(mel_batch, img_batch)
 
-    start_time = time.time()
-    avg_time = 0
-    num_batches = 0
-    for i, (img_batch, mel_batch, frames, coords) in enumerate(tqdm(gen, 
-                                            total=int(np.ceil(float(len(mel_chunks))/batch_size)))):
-        start = time.time()
-        img_batch = torch.FloatTensor(np.transpose(img_batch, (0, 3, 1, 2))).to(device)
-        mel_batch = torch.FloatTensor(np.transpose(mel_batch, (0, 3, 1, 2))).to(device)
+            pred = pred.cpu().numpy().transpose(0, 2, 3, 1) * 255.
+            
+            for p, f, c in zip(pred, frames, coords):
+                y1, y2, x1, x2 = c
+                p = cv2.resize(p.astype(np.uint8), (x2 - x1, y2 - y1))
 
-        with torch.no_grad():
-            pred = model(mel_batch, img_batch)
+                f[y1:y2, x1:x2] = p
+                out.write(f)
+            end = time.time()
+            avg_time += end-start
+            num_batches += 1
 
-        pred = pred.cpu().numpy().transpose(0, 2, 3, 1) * 255.
-        
-        for p, f, c in zip(pred, frames, coords):
-            y1, y2, x1, x2 = c
-            p = cv2.resize(p.astype(np.uint8), (x2 - x1, y2 - y1))
+        out.release()
+        end_time = time.time()
+        # print('Wav2Lip inference time:', end_time-start_time)
+        # print('Wav2Lip inference avg_time:', avg_time/num_batches)
 
-            f[y1:y2, x1:x2] = p
-            out.write(f)
-        end = time.time()
-        avg_time += end-start
-        num_batches += 1
+        command = 'ffmpeg -y -i {} -i {} -strict -2 -q:v 1 {} -loglevel quiet'.format('temp/'+args.outfile.split('/')[-1][:-4]+'_chunk_{}.wav'.format(chunk_num), 'temp/'+args.outfile.split('/')[-1][:-4]+'.avi', args.outfile[:-4]+'_chunk_'+str(chunk_num)+args.outfile[-4:])
+        subprocess.call(command, shell=platform.system() != 'Windows')
 
-    out.release()
-    end_time = time.time()
-    print('Wav2Lip inference time:', end_time-start_time)
-    print('Wav2Lip inference avg_time:', avg_time/num_batches)
-
-    # command = 'ffmpeg -y -i {} -i {} -strict -2 -q:v 1 {}'.format(args.audio, 'temp/result.avi', args.outfile)
-    command = 'ffmpeg -y -i {} -i {} -strict -2 -q:v 1 {}'.format('temp/output.wav', 'temp/result.avi', args.outfile)
-    subprocess.call(command, shell=platform.system() != 'Windows')
+        chunk_num += 1
+    all_end_time = time.time()
+    print('all time:', all_end_time-all_start_time)
 
 if __name__ == '__main__':
     main()
