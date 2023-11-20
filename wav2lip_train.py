@@ -40,7 +40,6 @@ syncnet_mel_step_size = 16
 class Dataset(object):
     def __init__(self, split):
         self.all_videos = get_image_list(args.data_root, split)
-        # print('self.all_videos:', len(self.all_videos))
 
     def get_frame_id(self, frame):
         return int(basename(frame).split('.')[0])
@@ -112,11 +111,8 @@ class Dataset(object):
     def __getitem__(self, idx):
         while 1:
             idx = random.randint(0, len(self.all_videos) - 1)
-            # print('idx:', idx)
             vidname = self.all_videos[idx]
-            # print('vidname:', vidname)
             img_names = list(glob(join(vidname, '*.jpg')))
-            # print('img_names:', len(img_names))
             if len(img_names) <= 3 * syncnet_T:
                 continue
             
@@ -189,6 +185,7 @@ def cosine_loss(a, v, y):
 
 device = torch.device("cuda" if use_cuda else "cpu")
 syncnet = SyncNet().to(device)
+syncnet.eval()
 for p in syncnet.parameters():
     p.requires_grad = False
 
@@ -264,7 +261,7 @@ def train(device, model, train_data_loader, test_data_loader, optimizer,
         
 
 def eval_model(test_data_loader, global_step, device, model, checkpoint_dir):
-    eval_steps = 700
+    eval_steps = 6  # default: 700
     print('Evaluating for {} steps'.format(eval_steps))
     sync_losses, recon_losses = [], []
     step = 0
