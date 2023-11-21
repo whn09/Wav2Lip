@@ -247,7 +247,7 @@ def main():
     chunk_num = 0
     all_start_time = time.time()
     while True:
-        chunk = pcm_stream.read(6096)
+        chunk = pcm_stream.read(6096*10)  # default: 6096
         if not chunk:
             break
         pcm_data += chunk
@@ -340,10 +340,11 @@ def main():
         # print('num_batches:', num_batches)
         print('num_frames:', num_frames)
 
-        out_mp4_filename = args.outfile[:-4]+'_chunk_'+str(chunk_num)+args.outfile[-4:]
-        command = 'ffmpeg -y -i {} -i {} -strict -2 -q:v 1 {} -loglevel quiet'.format(temp_wav_filename, temp_avi_filename, out_mp4_filename)
-        subprocess.call(command, shell=platform.system() != 'Windows')
-        rtmp_command = 'ffmpeg -re -i {} -vcodec h264 -vprofile baseline -acodec aac -ar 16000 -strict -2 -ac 1 -f flv -s 480x636 -q 10 YOUR_RTMP_URL'.format(out_mp4_filename)
+        # out_mp4_filename = args.outfile[:-4]+'_chunk_'+str(chunk_num)+args.outfile[-4:]
+        # command = 'ffmpeg -y -i {} -i {} -strict -2 -q:v 1 {} -loglevel quiet'.format(temp_wav_filename, temp_avi_filename, out_mp4_filename)
+        # # subprocess.call(command, shell=platform.system() != 'Windows')
+
+        rtmp_command = 'ffmpeg -re -i {} -i {} -vcodec h264 -vprofile baseline -acodec aac -ar 16000 -ac 1 -f flv -s 480x636 YOUR_RTMP_URL'.format(temp_wav_filename, temp_avi_filename)  # -loglevel quiet
         subprocess.call(rtmp_command, shell=platform.system() != 'Windows')
 
         chunk_num += 1
