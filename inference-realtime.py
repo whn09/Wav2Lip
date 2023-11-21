@@ -260,7 +260,8 @@ def main():
         mel = audio.melspectrogram(wav)
         # print('mel.shape:', mel.shape)
 
-        audio.save_wav(chunk_array, 'temp/'+args.outfile.split('/')[-1][:-4]+'_chunk_{}.wav'.format(chunk_num), 16000)
+        temp_wav_filename = 'temp/'+args.outfile.split('/')[-1][:-4]+'_chunk_{}.wav'.format(chunk_num)
+        audio.save_wav(chunk_array, temp_wav_filename, 16000)
     
     # # 将 PCM 数据转换为 numpy 数组
     # pcm_array = np.frombuffer(pcm_data, dtype=np.int16).astype(np.float32)
@@ -300,12 +301,14 @@ def main():
         gen = datagen(sub_frames.copy(), sub_face_det_results.copy(), mel_chunks)
 
         frame_h, frame_w = sub_frames[0].shape[:-1]
+        temp_avi_filename = 'temp/'+args.outfile.split('/')[-1][:-4]+'.avi'
         # out = cv2.VideoWriter('temp/result.avi', cv2.VideoWriter_fourcc(*'DIVX'), fps, (frame_w, frame_h))
-        out = cv2.VideoWriter('temp/'+args.outfile.split('/')[-1][:-4]+'.avi', cv2.VideoWriter_fourcc(*'DIVX'), fps, (frame_w, frame_h))
+        out = cv2.VideoWriter(temp_avi_filename, cv2.VideoWriter_fourcc(*'DIVX'), fps, (frame_w, frame_h))
 
         start_time = time.time()
         avg_time = 0
         num_batches = 0
+        num_frames = 0
         # for i, (img_batch, mel_batch, frames, coords) in enumerate(tqdm(gen, 
         #                                         total=int(np.ceil(float(len(mel_chunks))/batch_size)))):
         for i, (img_batch, mel_batch, frames, coords) in enumerate(gen):
@@ -325,6 +328,7 @@ def main():
 
                 f[y1:y2, x1:x2] = p
                 out.write(f)
+                num_frames += 1
             end = time.time()
             avg_time += end-start
             num_batches += 1
@@ -333,12 +337,18 @@ def main():
         end_time = time.time()
         # print('Wav2Lip inference time:', end_time-start_time)
         # print('Wav2Lip inference avg_time:', avg_time/num_batches)
+        # print('num_batches:', num_batches)
+        print('num_frames:', num_frames)
 
-        command = 'ffmpeg -y -i {} -i {} -strict -2 -q:v 1 {} -loglevel quiet'.format('temp/'+args.outfile.split('/')[-1][:-4]+'_chunk_{}.wav'.format(chunk_num), 'temp/'+args.outfile.split('/')[-1][:-4]+'.avi', args.outfile[:-4]+'_chunk_'+str(chunk_num)+args.outfile[-4:])
+        out_mp4_filename = args.outfile[:-4]+'_chunk_'+str(chunk_num)+args.outfile[-4:]
+        command = 'ffmpeg -y -i {} -i {} -strict -2 -q:v 1 {} -loglevel quiet'.format(temp_wav_filename, temp_avi_filename, out_mp4_filename)
         subprocess.call(command, shell=platform.system() != 'Windows')
+        rtmp_command = 'ffmpeg -re -i {} -vcodec h264 -vprofile baseline -acodec aac -ar 16000 -strict -2 -ac 1 -f flv -s 480x636 -q 10 YOUR_RTMP_URL'.format(out_mp4_filename)
+        subprocess.call(rtmp_command, shell=platform.system() != 'Windows')
 
         chunk_num += 1
     all_end_time = time.time()
+    print('chunk_num:', chunk_num)
     print('all time:', all_end_time-all_start_time)
 
 if __name__ == '__main__':
