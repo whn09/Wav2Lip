@@ -23,6 +23,8 @@ parser.add_argument('--face', type=str,
 #                     help='Filepath of video/audio file to use as raw audio source', required=True)
 parser.add_argument('--text', type=str, 
                     help='Text used to synthesize speech', required=True)
+parser.add_argument('--rtmp_server', type=str, 
+                    help='RTMP server url', required=True)
 parser.add_argument('--outfile', type=str, help='Video path to save result. See default for an e.g.', 
                                 default='results/result_voice.mp4')
 
@@ -301,7 +303,7 @@ def main():
         gen = datagen(sub_frames.copy(), sub_face_det_results.copy(), mel_chunks)
 
         frame_h, frame_w = sub_frames[0].shape[:-1]
-        temp_avi_filename = 'temp/'+args.outfile.split('/')[-1][:-4]+'.avi'
+        temp_avi_filename = 'temp/'+args.outfile.split('/')[-1][:-4]+'_chunk_{}.avi'.format(chunk_num)
         # out = cv2.VideoWriter('temp/result.avi', cv2.VideoWriter_fourcc(*'DIVX'), fps, (frame_w, frame_h))
         out = cv2.VideoWriter(temp_avi_filename, cv2.VideoWriter_fourcc(*'DIVX'), fps, (frame_w, frame_h))
 
@@ -338,14 +340,28 @@ def main():
         # print('Wav2Lip inference time:', end_time-start_time)
         # print('Wav2Lip inference avg_time:', avg_time/num_batches)
         # print('num_batches:', num_batches)
-        print('num_frames:', num_frames)
+        # print('*'*20)
+        # print('num_frames:', num_frames)
+        # print('#'*20)
 
         # out_mp4_filename = args.outfile[:-4]+'_chunk_'+str(chunk_num)+args.outfile[-4:]
         # command = 'ffmpeg -y -i {} -i {} -strict -2 -q:v 1 {} -loglevel quiet'.format(temp_wav_filename, temp_avi_filename, out_mp4_filename)
         # # subprocess.call(command, shell=platform.system() != 'Windows')
 
-        rtmp_command = 'ffmpeg -re -i {} -i {} -vcodec h264 -vprofile baseline -acodec aac -ar 16000 -ac 1 -f flv -s 480x636 YOUR_RTMP_URL'.format(temp_wav_filename, temp_avi_filename)  # -loglevel quiet
+        # command = 'ffprobe '+temp_wav_filename
+        # subprocess.call(command, shell=platform.system() != 'Windows')
+
+        # command = 'ffprobe '+temp_avi_filename
+        # subprocess.call(command, shell=platform.system() != 'Windows')
+
+        rtmp_command = 'ffmpeg -re -i {} -i {} -vcodec h264 -vprofile baseline -acodec aac -ar 16000 -ac 1 -f flv -s 480x636 -flvflags no_duration_filesize {}'.format(temp_wav_filename, temp_avi_filename, args.rtmp_server)  # -loglevel quiet
         subprocess.call(rtmp_command, shell=platform.system() != 'Windows')
+
+        # out_mp4_filename = args.outfile[:-4]+'_chunk_'+str(chunk_num)+args.outfile[-4:]
+        # command = 'ffmpeg -y -i {} -i {} -strict -2 -q:v 1 {} -loglevel quiet'.format(temp_wav_filename, temp_avi_filename, out_mp4_filename)
+        # ffprobe_command = 'ffprobe '+out_mp4_filename
+        # rtmp_command = 'ffmpeg -re -i {} -vcodec h264 -vprofile baseline -acodec aac -ar 16000 -ac 1 -f flv -s 480x636 {}'.format(out_mp4_filename, args.rtmp_server)  # -loglevel quiet
+        # subprocess.call(command + ' && ' + ffprobe_command + ' && ' + rtmp_command, shell=platform.system() != 'Windows')
 
         chunk_num += 1
     all_end_time = time.time()
