@@ -176,7 +176,7 @@ def load_model(path):
     for k, v in s.items():
         new_s[k.replace('module.', '')] = v
     model.load_state_dict(new_s)
-
+    print('checkpoint:', checkpoint['global_epoch'], checkpoint['global_step'])
     model = model.to(device)
     return model.eval()
 
