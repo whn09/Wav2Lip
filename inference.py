@@ -107,18 +107,8 @@ def face_detect(images):
     del detector
     return results 
 
-def datagen(frames, mels):
+def datagen(frames, mels, face_det_results):
     img_batch, mel_batch, frame_batch, coords_batch = [], [], [], []
-
-    if args.box[0] == -1:
-        if not args.static:
-            face_det_results = face_detect(frames) # BGR2RGB for CNN face detection
-        else:
-            face_det_results = face_detect([frames[0]])
-    else:
-        print('Using the specified bounding box instead of face detection...')
-        y1, y2, x1, x2 = args.box
-        face_det_results = [[f[y1: y2, x1:x2], (y1, y2, x1, x2)] for f in frames]
 
     for i, m in enumerate(mels):
         idx = 0 if args.static else i%len(frames)
@@ -244,9 +234,19 @@ def main():
     print("Length of mel chunks: {}".format(len(mel_chunks)))
 
     full_frames = full_frames[:len(mel_chunks)]
+    
+    if args.box[0] == -1:
+        if not args.static:
+            face_det_results = face_detect(full_frames) # BGR2RGB for CNN face detection
+        else:
+            face_det_results = face_detect([full_frames[0]])
+    else:
+        print('Using the specified bounding box instead of face detection...')
+        y1, y2, x1, x2 = args.box
+        face_det_results = [[f[y1: y2, x1:x2], (y1, y2, x1, x2)] for f in full_frames]
 
     batch_size = args.wav2lip_batch_size
-    gen = datagen(full_frames.copy(), mel_chunks)
+    gen = datagen(full_frames.copy(), mel_chunks, face_det_results)
 
     model = load_model(args.checkpoint_path)
     print ("Model loaded")
@@ -284,7 +284,7 @@ def main():
     print('Wav2Lip inference avg_time:', avg_time/num_batches)
 
     command = 'ffmpeg -y -i {} -i {} -strict -2 -q:v 1 {}'.format(args.audio, 'temp/result.avi', args.outfile)
-    subprocess.call(command, shell=platform.system() != 'Windows')
+    # subprocess.call(command, shell=platform.system() != 'Windows')
 
 if __name__ == '__main__':
     main()
