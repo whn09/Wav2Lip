@@ -1,7 +1,7 @@
 import numpy as np
 import scipy, cv2, os, sys, argparse
 import json, subprocess, random, string
-# from tqdm import tqdm
+from tqdm import tqdm
 from glob import glob
 import torch, face_detection
 from models import Wav2Lip
@@ -24,7 +24,7 @@ parser.add_argument('--face', type=str,
 parser.add_argument('--text', type=str, 
                     help='Text used to synthesize speech', required=True)
 parser.add_argument('--rtmp_server', type=str, 
-                    help='RTMP server url', required=True)
+                    help='RTMP server url', default='', required=False)
 parser.add_argument('--outfile', type=str, help='Video path to save result. See default for an e.g.', 
                                 default='results/result_voice.mp4')
 
@@ -85,8 +85,8 @@ def face_detect(images):
     while 1:
         predictions = []
         try:
-            # for i in tqdm(range(0, len(images), batch_size)):
-            for i in range(0, len(images), batch_size):
+            for i in tqdm(range(0, len(images), batch_size)):
+            # for i in range(0, len(images), batch_size):
                 predictions.extend(detector.get_detections_for_batch(np.array(images[i:i + batch_size])))
         except RuntimeError:
             if batch_size == 1: 
@@ -226,7 +226,15 @@ def main():
 
     # print ("Number of frames available for inference: "+str(len(full_frames)))
 
-    face_det_results = face_detect(full_frames)
+    if args.box[0] == -1:
+        if not args.static:
+            face_det_results = face_detect(full_frames) # BGR2RGB for CNN face detection
+        else:
+            face_det_results = face_detect([full_frames[0]])
+    else:
+        print('Using the specified bounding box instead of face detection...')
+        y1, y2, x1, x2 = args.box
+        face_det_results = [[f[y1: y2, x1:x2], (y1, y2, x1, x2)] for f in full_frames]
     for i in range(len(face_det_results)):
         face_det_results[i][0] = cv2.resize(face_det_results[i][0], (args.img_size, args.img_size))
 
@@ -249,10 +257,10 @@ def main():
     chunk_num = 0
     all_start_time = time.time()
     while True:
-        chunk = pcm_stream.read(6096*10)  # default: 6096
+        chunk = pcm_stream.read(32000)  # min: 6096, 32000 means 1s audio
         if not chunk:
             break
-        pcm_data += chunk
+        # pcm_data += chunk
 
         # 将 PCM 数据转换为 numpy 数组
         chunk_array = np.frombuffer(chunk, dtype=np.int16).astype(np.float32)
@@ -263,7 +271,7 @@ def main():
         # print('mel.shape:', mel.shape)
 
         temp_wav_filename = 'temp/'+args.outfile.split('/')[-1][:-4]+'_chunk_{}.wav'.format(chunk_num)
-        audio.save_wav(chunk_array, temp_wav_filename, 16000)
+        # audio.save_wav(chunk_array, temp_wav_filename, 16000)
     
     # # 将 PCM 数据转换为 numpy 数组
     # pcm_array = np.frombuffer(pcm_data, dtype=np.int16).astype(np.float32)
@@ -311,9 +319,9 @@ def main():
         avg_time = 0
         num_batches = 0
         num_frames = 0
-        # for i, (img_batch, mel_batch, frames, coords) in enumerate(tqdm(gen, 
-        #                                         total=int(np.ceil(float(len(mel_chunks))/batch_size)))):
-        for i, (img_batch, mel_batch, frames, coords) in enumerate(gen):
+        for i, (img_batch, mel_batch, frames, coords) in enumerate(tqdm(gen, 
+                                                total=int(np.ceil(float(len(mel_chunks))/batch_size)))):
+        # for i, (img_batch, mel_batch, frames, coords) in enumerate(gen):
             start = time.time()
             img_batch = torch.FloatTensor(np.transpose(img_batch, (0, 3, 1, 2))).to(device)
             mel_batch = torch.FloatTensor(np.transpose(mel_batch, (0, 3, 1, 2))).to(device)
@@ -337,7 +345,7 @@ def main():
 
         out.release()
         end_time = time.time()
-        # print('Wav2Lip inference time:', end_time-start_time)
+        print('Wav2Lip inference time:', end_time-start_time)
         # print('Wav2Lip inference avg_time:', avg_time/num_batches)
         # print('num_batches:', num_batches)
         # print('*'*20)
@@ -355,7 +363,7 @@ def main():
         # subprocess.call(command, shell=platform.system() != 'Windows')
 
         rtmp_command = 'ffmpeg -re -i {} -i {} -vcodec h264 -vprofile baseline -acodec aac -ar 16000 -ac 1 -f flv -s 480x636 -flvflags no_duration_filesize {}'.format(temp_wav_filename, temp_avi_filename, args.rtmp_server)  # -loglevel quiet
-        subprocess.call(rtmp_command, shell=platform.system() != 'Windows')
+        # subprocess.call(rtmp_command, shell=platform.system() != 'Windows')
 
         # out_mp4_filename = args.outfile[:-4]+'_chunk_'+str(chunk_num)+args.outfile[-4:]
         # command = 'ffmpeg -y -i {} -i {} -strict -2 -q:v 1 {} -loglevel quiet'.format(temp_wav_filename, temp_avi_filename, out_mp4_filename)

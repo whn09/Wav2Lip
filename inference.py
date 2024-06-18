@@ -109,13 +109,23 @@ def face_detect(images):
 
 def datagen(frames, mels, face_det_results):
     img_batch, mel_batch, frame_batch, coords_batch = [], [], [], []
+    
+    # if args.box[0] == -1:
+    #     if not args.static:
+    #         face_det_results = face_detect(frames) # BGR2RGB for CNN face detection
+    #     else:
+    #         face_det_results = face_detect([frames[0]])
+    # else:
+    #     print('Using the specified bounding box instead of face detection...')
+    #     y1, y2, x1, x2 = args.box
+    #     face_det_results = [[f[y1: y2, x1:x2], (y1, y2, x1, x2)] for f in frames]
 
     for i, m in enumerate(mels):
         idx = 0 if args.static else i%len(frames)
         frame_to_save = frames[idx].copy()
         face, coords = face_det_results[idx].copy()
 
-        face = cv2.resize(face, (args.img_size, args.img_size))
+        # face = cv2.resize(face, (args.img_size, args.img_size))
             
         img_batch.append(face)
         mel_batch.append(m)
@@ -166,7 +176,7 @@ def load_model(path):
     for k, v in s.items():
         new_s[k.replace('module.', '')] = v
     model.load_state_dict(new_s)
-    print('checkpoint:', checkpoint['global_epoch'], checkpoint['global_step'])
+    # print('checkpoint:', checkpoint['global_epoch'], checkpoint['global_step'])
     model = model.to(device)
     return model.eval()
 
@@ -244,6 +254,8 @@ def main():
         print('Using the specified bounding box instead of face detection...')
         y1, y2, x1, x2 = args.box
         face_det_results = [[f[y1: y2, x1:x2], (y1, y2, x1, x2)] for f in full_frames]
+    for i in range(len(face_det_results)):
+        face_det_results[i][0] = cv2.resize(face_det_results[i][0], (args.img_size, args.img_size))
 
     batch_size = args.wav2lip_batch_size
     gen = datagen(full_frames.copy(), mel_chunks, face_det_results)
@@ -281,7 +293,7 @@ def main():
     out.release()
     end_time = time.time()
     print('Wav2Lip inference time:', end_time-start_time)
-    print('Wav2Lip inference avg_time:', avg_time/num_batches)
+    # print('Wav2Lip inference avg_time:', avg_time/num_batches)
 
     command = 'ffmpeg -y -i {} -i {} -strict -2 -q:v 1 {}'.format(args.audio, 'temp/result.avi', args.outfile)
     # subprocess.call(command, shell=platform.system() != 'Windows')
