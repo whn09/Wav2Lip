@@ -343,13 +343,15 @@ def predict_fn(input_data, model):
     all_end_time = time.time()
     print('chunk_num:', chunk_num)
     print('all time:', all_end_time-all_start_time)
-    return '', ''
 
 
 def output_fn(prediction, content_type):
-    audio_url, output_url = prediction
-    result = {'audio_url': audio_url, 'output_path': output_url}
-    return result
+    results = []
+    for audio_url, output_url in prediction:
+        result = {'audio_url': audio_url, 'output_path': output_url}
+        print('result:', result)
+        results.append(result)
+    return results
 
 
 # if __name__ == '__main__':
@@ -361,6 +363,7 @@ def output_fn(prediction, content_type):
 #     input_data = input_fn(request_body, request_content_type)
 
 #     for prediction in predict_fn(input_data, model):
-#         response_content_type = 'application/json'
-#         result = output_fn(prediction, response_content_type)
-#         print('result:', result)
+#         print('prediction:', prediction)
+#         # response_content_type = 'application/json'
+#         # result = output_fn(prediction, response_content_type)
+#         # print('result:', result)
