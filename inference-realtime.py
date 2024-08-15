@@ -10,6 +10,7 @@ import platform
 
 import time
 import boto3
+import requests
 
 
 parser = argparse.ArgumentParser(description='Inference code to lip-sync videos in the wild using Wav2Lip models')
@@ -190,6 +191,19 @@ def load_model(path):
     model = model.to(device)
     return model.eval()
 
+HLS_SERVER = "http://HLS_SERVER_URL/upload"
+
+def send_video(video_path):
+    filename = os.path.basename(video_path)
+    with open(video_path, 'rb') as f:
+        files = {'file': (filename, f)}
+        response = requests.post(HLS_SERVER, files=files)
+        if response.status_code == 200:
+            # print(f"Successfully sent {filename} to HLS server")
+            pass
+        else:
+            print(f"Failed to send {filename}. Status code: {response.status_code}")
+
 def main():
     if not os.path.isfile(args.face):
         raise ValueError('--face argument must be a valid path to video/image file')
@@ -251,13 +265,17 @@ def main():
     response = polly_client.synthesize_speech(VoiceId='Matthew',  # Joanna: Female, Matthew: Male
                     OutputFormat='pcm', 
                     Text = args.text)
+    
+    os.system('rm -rf results/*.mp4')
+    os.system('rm -rf filelist.txt')
+    concat_url = "concat:"
                     
     pcm_stream = response['AudioStream']
     pcm_data = b''
     chunk_num = 0
     all_start_time = time.time()
     while True:
-        chunk = pcm_stream.read(32000)  # min: 6096, 32000 means 1s audio
+        chunk = pcm_stream.read(32000*4)  # min: 6096, 32000 means 1s audio
         if not chunk:
             break
         # pcm_data += chunk
@@ -271,7 +289,7 @@ def main():
         # print('mel.shape:', mel.shape)
 
         temp_wav_filename = 'temp/'+args.outfile.split('/')[-1][:-4]+'_chunk_{}.wav'.format(chunk_num)
-        # audio.save_wav(chunk_array, temp_wav_filename, 16000)
+        audio.save_wav(chunk_array, temp_wav_filename, 16000)
     
     # # 将 PCM 数据转换为 numpy 数组
     # pcm_array = np.frombuffer(pcm_data, dtype=np.int16).astype(np.float32)
@@ -352,24 +370,74 @@ def main():
         # print('num_frames:', num_frames)
         # print('#'*20)
 
+        # # 方法1：把wav和avi直接推送到rtmp，但是有问题，可能中间突然断掉
+        # rtmp_command = 'ffmpeg -re -i {} -i {} -vcodec h264 -vprofile baseline -acodec aac -ar 16000 -ac 1 -f flv -s 480x636 -flvflags no_duration_filesize {}'.format(temp_wav_filename, temp_avi_filename, args.rtmp_server)  # -loglevel quiet
+        # subprocess.call(rtmp_command, shell=platform.system() != 'Windows')
+
+        # # 方法2：先把wav和avi合成mp4，再推送到rtmp，但是有问题，可能中间突然断掉
         # out_mp4_filename = args.outfile[:-4]+'_chunk_'+str(chunk_num)+args.outfile[-4:]
         # command = 'ffmpeg -y -i {} -i {} -strict -2 -q:v 1 {} -loglevel quiet'.format(temp_wav_filename, temp_avi_filename, out_mp4_filename)
-        # # subprocess.call(command, shell=platform.system() != 'Windows')
+        # ffprobe_command = 'ffprobe '+out_mp4_filename
+        # rtmp_command = 'ffmpeg -re -i {} -vcodec h264 -vprofile baseline -acodec aac -ar 16000 -ac 1 -f flv -s 480x636 {}'.format(out_mp4_filename, args.rtmp_server)  # -loglevel quiet
+        # subprocess.call(command + ' && ' + ffprobe_command + ' && ' + rtmp_command, shell=platform.system() != 'Windows')
+        
+        ffmpeg_start = time.time()
+        # 方法3：先把wav和avi合成mp4
+        out_mp4_filename = args.outfile[:-4]+'_chunk_'+str(chunk_num)+args.outfile[-4:]
+        command = 'ffmpeg -y -i {} -i {} -strict -2 -q:v 1 {} -loglevel quiet'.format(temp_wav_filename, temp_avi_filename, out_mp4_filename)
+        # subprocess.call(command, shell=platform.system() != 'Windows')
+        os.system(command)
+        ffmpeg_end = time.time()
+        print('ffmpeg time:', ffmpeg_end-ffmpeg_start)
 
         # command = 'ffprobe '+temp_wav_filename
         # subprocess.call(command, shell=platform.system() != 'Windows')
 
         # command = 'ffprobe '+temp_avi_filename
         # subprocess.call(command, shell=platform.system() != 'Windows')
-
-        rtmp_command = 'ffmpeg -re -i {} -i {} -vcodec h264 -vprofile baseline -acodec aac -ar 16000 -ac 1 -f flv -s 480x636 -flvflags no_duration_filesize {}'.format(temp_wav_filename, temp_avi_filename, args.rtmp_server)  # -loglevel quiet
+        
+#         # 方法3-1：固定文件列表模式，但是有问题，由于一开始就要所有文件，推送会找不到文件
+#         if chunk_num == 0:
+#             with open('filelist.txt', 'w') as fout:
+#                 for i in range(70):
+#                     out_mp4_filename_i = args.outfile[:-4]+'_chunk_'+str(i)+args.outfile[-4:]
+#                     fout.write('file \'{}\'\n'.format(out_mp4_filename_i))
+                
+#             rtmp_command = 'ffmpeg -f concat -safe 0 -i filelist.txt -vcodec h264 -vprofile baseline -acodec aac -ar 16000 -strict -2 -ac 1 -f flv -s 480x636 -flvflags no_duration_filesize -q 25 {}'.format(args.rtmp_server)
+#             subprocess.call(rtmp_command, shell=platform.system() != 'Windows')
+            
+        # # 方法3-2：动态扩展文件列表模式，但是有问题，每次会重新播放
+        # with open('filelist.txt', 'a') as fout:
+        #     fout.write('file \'{}\'\n'.format(out_mp4_filename))
+        # rtmp_command = 'ffmpeg -f concat -safe 0 -i filelist.txt -vcodec h264 -vprofile baseline -acodec aac -ar 16000 -strict -2 -ac 1 -f flv -s 480x636 -flvflags no_duration_filesize -q 25 {}'.format(args.rtmp_server)
         # subprocess.call(rtmp_command, shell=platform.system() != 'Windows')
+        
+        # # 方法3-3：动态扩展文件到concat_url，但是有问题，每次会重新播放
+        # if chunk_num == 0:
+        #     concat_url += out_mp4_filename
+        # else:
+        #     concat_url += '|'+out_mp4_filename
+        # rtmp_command = f'ffmpeg -re -i "{concat_url}" -vcodec h264 -vprofile baseline -acodec aac -ar 16000 -strict -2 -ac 1 -f flv -s 480x636 -flvflags no_duration_filesize -q 25 {args.rtmp_server}'
+        # print('rtmp_command:', rtmp_command)
+        # subprocess.call(rtmp_command, shell=platform.system() != 'Windows')
+        
+#         # 方法3-4：固定文件列表模式，但是有问题，由于一开始就要所有文件，推送会找不到文件
+#         if chunk_num == 0:
+#             out_mp4_filenames = []
+#             for i in range(70):
+#                 out_mp4_filename_i = args.outfile[:-4]+'_chunk_'+str(i)+args.outfile[-4:]
+#                 out_mp4_filenames.append(out_mp4_filename_i)
+                
+#             concat_url += '|'.join(out_mp4_filenames)
+#             rtmp_command = f'ffmpeg -re -i "{concat_url}" -vcodec h264 -vprofile baseline -acodec aac -ar 16000 -strict -2 -ac 1 -f flv -s 480x636 -flvflags no_duration_filesize -q 25 {args.rtmp_server}'
+#             print('rtmp_command:', rtmp_command)
+#             subprocess.call(rtmp_command, shell=platform.system() != 'Windows')
 
-        # out_mp4_filename = args.outfile[:-4]+'_chunk_'+str(chunk_num)+args.outfile[-4:]
-        # command = 'ffmpeg -y -i {} -i {} -strict -2 -q:v 1 {} -loglevel quiet'.format(temp_wav_filename, temp_avi_filename, out_mp4_filename)
-        # ffprobe_command = 'ffprobe '+out_mp4_filename
-        # rtmp_command = 'ffmpeg -re -i {} -vcodec h264 -vprofile baseline -acodec aac -ar 16000 -ac 1 -f flv -s 480x636 {}'.format(out_mp4_filename, args.rtmp_server)  # -loglevel quiet
-        # subprocess.call(command + ' && ' + ffprobe_command + ' && ' + rtmp_command, shell=platform.system() != 'Windows')
+        # 方法4：使用HLS
+        send_start = time.time()
+        send_video(out_mp4_filename)
+        send_end = time.time()
+        print('send time:', send_end-send_start)
 
         chunk_num += 1
     all_end_time = time.time()
