@@ -9,64 +9,7 @@ import audio
 import platform
 
 import time
-import boto3
 import requests
-
-
-parser = argparse.ArgumentParser(description='Inference code to lip-sync videos in the wild using Wav2Lip models')
-
-parser.add_argument('--checkpoint_path', type=str, 
-                    help='Name of saved checkpoint to load weights from', required=True)
-
-parser.add_argument('--face', type=str, 
-                    help='Filepath of video/image that contains faces to use', required=True)
-# parser.add_argument('--audio', type=str, 
-#                     help='Filepath of video/audio file to use as raw audio source', required=True)
-parser.add_argument('--text', type=str, 
-                    help='Text used to synthesize speech', required=True)
-parser.add_argument('--rtmp_server', type=str, 
-                    help='RTMP server url', default='', required=False)
-parser.add_argument('--outfile', type=str, help='Video path to save result. See default for an e.g.', 
-                                default='results/result_voice.mp4')
-
-parser.add_argument('--static', type=bool, 
-                    help='If True, then use only first video frame for inference', default=False)
-parser.add_argument('--fps', type=float, help='Can be specified only if input is a static image (default: 25)', 
-                    default=25., required=False)
-
-parser.add_argument('--pads', nargs='+', type=int, default=[0, 10, 0, 0], 
-                    help='Padding (top, bottom, left, right). Please adjust to include chin at least')
-
-parser.add_argument('--face_det_batch_size', type=int, 
-                    help='Batch size for face detection', default=16)
-parser.add_argument('--wav2lip_batch_size', type=int, help='Batch size for Wav2Lip model(s)', default=128)
-
-parser.add_argument('--resize_factor', default=1, type=int, 
-            help='Reduce the resolution by this factor. Sometimes, best results are obtained at 480p or 720p')
-
-parser.add_argument('--crop', nargs='+', type=int, default=[0, -1, 0, -1], 
-                    help='Crop video to a smaller region (top, bottom, left, right). Applied after resize_factor and rotate arg. ' 
-                    'Useful if multiple face present. -1 implies the value will be auto-inferred based on height, width')
-
-parser.add_argument('--box', nargs='+', type=int, default=[-1, -1, -1, -1], 
-                    help='Specify a constant bounding box for the face. Use only as a last resort if the face is not detected.'
-                    'Also, might work only if the face is not moving around much. Syntax: (top, bottom, left, right).')
-
-parser.add_argument('--rotate', default=False, action='store_true',
-                    help='Sometimes videos taken from a phone can be flipped 90deg. If true, will flip video right by 90deg.'
-                    'Use if you get a flipped result, despite feeding a normal looking video')
-
-parser.add_argument('--nosmooth', default=False, action='store_true',
-                    help='Prevent smoothing face detections over a short temporal window')
-
-args = parser.parse_args()
-args.img_size = 96
-
-# 创建Amazon Polly客户端
-polly_client = boto3.Session().client('polly', region_name='us-east-1')
-
-if os.path.isfile(args.face) and args.face.split('.')[1] in ['jpg', 'png', 'jpeg']:
-    args.static = True
 
 def get_smoothened_boxes(boxes, T):
     for i in range(len(boxes)):
@@ -77,7 +20,7 @@ def get_smoothened_boxes(boxes, T):
         boxes[i] = np.mean(window, axis=0)
     return boxes
 
-def face_detect(images, face_det_batch_size):
+def face_detect(images, face_det_batch_size, pads, nosmooth):
     detector = face_detection.FaceAlignment(face_detection.LandmarksType._2D, 
                                             flip_input=False, device=device)
 
@@ -98,7 +41,7 @@ def face_detect(images, face_det_batch_size):
         break
 
     results = []
-    pady1, pady2, padx1, padx2 = args.pads
+    pady1, pady2, padx1, padx2 = pads
     for rect, image in zip(predictions, images):
         if rect is None:
             cv2.imwrite('temp/faulty_frame.jpg', image) # check this frame where the face was not detected.
@@ -112,13 +55,13 @@ def face_detect(images, face_det_batch_size):
         results.append([x1, y1, x2, y2])
 
     boxes = np.array(results)
-    if not args.nosmooth: boxes = get_smoothened_boxes(boxes, T=5)
+    if not nosmooth: boxes = get_smoothened_boxes(boxes, T=5)
     results = [[image[y1: y2, x1:x2], (y1, y2, x1, x2)] for image, (x1, y1, x2, y2) in zip(images, boxes)]
 
     del detector
     return results 
 
-def datagen(frames, face_det_results, mels):
+def datagen(frames, face_det_results, mels, static, wav2lip_batch_size, img_size):
     img_batch, mel_batch, frame_batch, coords_batch = [], [], [], []
 
     # if args.box[0] == -1:
@@ -132,7 +75,7 @@ def datagen(frames, face_det_results, mels):
     #     face_det_results = [[f[y1: y2, x1:x2], (y1, y2, x1, x2)] for f in frames]
 
     for i, m in enumerate(mels):
-        idx = 0 if args.static else i%len(frames)
+        idx = 0 if static else i%len(frames)
         frame_to_save = frames[idx].copy()
         face, coords = face_det_results[idx].copy()
 
@@ -143,11 +86,11 @@ def datagen(frames, face_det_results, mels):
         frame_batch.append(frame_to_save)
         coords_batch.append(coords)
 
-        if len(img_batch) >= args.wav2lip_batch_size:
+        if len(img_batch) >= wav2lip_batch_size:
             img_batch, mel_batch = np.asarray(img_batch), np.asarray(mel_batch)
 
             img_masked = img_batch.copy()
-            img_masked[:, args.img_size//2:] = 0
+            img_masked[:, img_size//2:] = 0
 
             img_batch = np.concatenate((img_masked, img_batch), axis=3) / 255.
             mel_batch = np.reshape(mel_batch, [len(mel_batch), mel_batch.shape[1], mel_batch.shape[2], 1])
@@ -159,7 +102,7 @@ def datagen(frames, face_det_results, mels):
         img_batch, mel_batch = np.asarray(img_batch), np.asarray(mel_batch)
 
         img_masked = img_batch.copy()
-        img_masked[:, args.img_size//2:] = 0
+        img_masked[:, img_size//2:] = 0
 
         img_batch = np.concatenate((img_masked, img_batch), axis=3) / 255.
         mel_batch = np.reshape(mel_batch, [len(mel_batch), mel_batch.shape[1], mel_batch.shape[2], 1])
@@ -199,12 +142,12 @@ def send_video(video_path):
         files = {'file': (filename, f)}
         response = requests.post(HLS_SERVER, files=files, verify=False)
         if response.status_code == 200:
-            # print(f"Successfully sent {filename} to HLS server")
+            print(f"Successfully sent {filename} to HLS server")
             pass
         else:
             print(f"Failed to send {filename}. Status code: {response.status_code}")
 
-def get_faces(face, fps, resize_factor, rotate, crop, box, static, img_size, face_det_batch_size):
+def get_faces(face, fps, resize_factor, rotate, crop, box, static, img_size, face_det_batch_size, pads, nosmooth):
     if not os.path.isfile(face):
         raise ValueError('--face argument must be a valid path to video/image file')
     elif face.split('.')[1] in ['jpg', 'png', 'jpeg']:
@@ -239,9 +182,9 @@ def get_faces(face, fps, resize_factor, rotate, crop, box, static, img_size, fac
 
     if box[0] == -1:
         if not static:
-            face_det_results = face_detect(full_frames, face_det_batch_size) # BGR2RGB for CNN face detection
+            face_det_results = face_detect(full_frames, face_det_batch_size, pads, nosmooth) # BGR2RGB for CNN face detection
         else:
-            face_det_results = face_detect([full_frames[0]], face_det_batch_size)
+            face_det_results = face_detect([full_frames[0]], face_det_batch_size, pads, nosmooth)
     else:
         print('Using the specified bounding box instead of face detection...')
         y1, y2, x1, x2 = box
@@ -251,7 +194,7 @@ def get_faces(face, fps, resize_factor, rotate, crop, box, static, img_size, fac
         
     return full_frames, face_det_results
 
-def process_chunk(model, full_frames, face_det_results, chunk_array, chunk_num, prefix, fps, wav2lip_batch_size):
+def process_chunk(model, full_frames, face_det_results, chunk_array, chunk_num, prefix, fps, wav2lip_batch_size, static, img_size, sample_rate):
     # 将 PCM 数据范围从 [-32768, 32767] 转换为 [-1.0, 1.0]
     chunk_array /= 32768.0
     wav = chunk_array
@@ -259,7 +202,7 @@ def process_chunk(model, full_frames, face_det_results, chunk_array, chunk_num, 
     # print('mel.shape:', mel.shape)
 
     temp_wav_filename = 'temp/'+prefix+'_chunk_{}.wav'.format(chunk_num)
-    audio.save_wav(chunk_array, temp_wav_filename, 16000)
+    audio.save_wav(chunk_array, temp_wav_filename, sample_rate)
 
 # # 将 PCM 数据转换为 numpy 数组
 # pcm_array = np.frombuffer(pcm_data, dtype=np.int16).astype(np.float32)
@@ -296,7 +239,7 @@ def process_chunk(model, full_frames, face_det_results, chunk_array, chunk_num, 
     sub_face_det_results = face_det_results[:len(mel_chunks)]
 
     batch_size = wav2lip_batch_size
-    gen = datagen(sub_frames.copy(), sub_face_det_results.copy(), mel_chunks)
+    gen = datagen(sub_frames.copy(), sub_face_det_results.copy(), mel_chunks, static, wav2lip_batch_size, img_size)
 
     frame_h, frame_w = sub_frames[0].shape[:-1]
     temp_avi_filename = 'temp/'+prefix+'_chunk_{}.avi'.format(chunk_num)
@@ -353,7 +296,7 @@ def process_chunk(model, full_frames, face_det_results, chunk_array, chunk_num, 
     
     ffmpeg_start = time.time()
     # 方法3：先把wav和avi合成mp4
-    out_mp4_filename = prefix+'_chunk_'+str(chunk_num)+'.mp4'
+    out_mp4_filename = 'temp/'+prefix+'_chunk_'+str(chunk_num)+'.mp4'
     command = 'ffmpeg -y -i {} -i {} -strict -2 -q:v 1 {} -loglevel quiet'.format(temp_wav_filename, temp_avi_filename, out_mp4_filename)
     # subprocess.call(command, shell=platform.system() != 'Windows')
     os.system(command)
@@ -411,7 +354,7 @@ def process_chunk(model, full_frames, face_det_results, chunk_array, chunk_num, 
     return out_mp4_filename
 
 def main():
-    full_frames, face_det_results = get_faces(args.face, args.fps, args.resize_factor, args.rotate, args.crop, args.box, args.static, args.img_size, args.face_det_batch_size)
+    full_frames, face_det_results = get_faces(args.face, args.fps, args.resize_factor, args.rotate, args.crop, args.box, args.static, args.img_size, args.face_det_batch_size, args.pads, args.nosmooth)
 
     # if not args.audio.endswith('.wav'):
     #     print('Extracting raw audio...')
@@ -444,7 +387,7 @@ def main():
         # 将 PCM 数据转换为 numpy 数组
         chunk_array = np.frombuffer(chunk, dtype=np.int16).astype(np.float32)
         
-        out_mp4_filename = process_chunk(model, full_frames, face_det_results, chunk_array, chunk_num, prefix=args.outfile.split('/')[-1][:-4], fps=args.fps, wav2lip_batch_size=args.wav2lip_batch_size)
+        out_mp4_filename = process_chunk(model, full_frames, face_det_results, chunk_array, chunk_num, prefix=args.outfile.split('/')[-1][:-4], fps=args.fps, wav2lip_batch_size=args.wav2lip_batch_size, static=args.static, img_size=args.img_size, sample_rate=args.sample_rate)
         if out_mp4_filename is None:
             break
 
@@ -454,4 +397,63 @@ def main():
     print('all time:', all_end_time-all_start_time)
 
 if __name__ == '__main__':
+    parser = argparse.ArgumentParser(description='Inference code to lip-sync videos in the wild using Wav2Lip models')
+
+    parser.add_argument('--checkpoint_path', type=str, 
+                        help='Name of saved checkpoint to load weights from', required=True)
+
+    parser.add_argument('--face', type=str, 
+                        help='Filepath of video/image that contains faces to use', required=True)
+    # parser.add_argument('--audio', type=str, 
+    #                     help='Filepath of video/audio file to use as raw audio source', required=True)
+    parser.add_argument('--text', type=str, 
+                        help='Text used to synthesize speech', required=True)
+    parser.add_argument('--rtmp_server', type=str, 
+                        help='RTMP server url', default='', required=False)
+    parser.add_argument('--outfile', type=str, help='Video path to save result. See default for an e.g.', 
+                                    default='results/result_voice.mp4')
+
+    parser.add_argument('--static', type=bool, 
+                        help='If True, then use only first video frame for inference', default=False)
+    parser.add_argument('--fps', type=float, help='Can be specified only if input is a static image (default: 25)', 
+                        default=25., required=False)
+
+    parser.add_argument('--pads', nargs='+', type=int, default=[0, 10, 0, 0], 
+                        help='Padding (top, bottom, left, right). Please adjust to include chin at least')
+
+    parser.add_argument('--face_det_batch_size', type=int, 
+                        help='Batch size for face detection', default=16)
+    parser.add_argument('--wav2lip_batch_size', type=int, help='Batch size for Wav2Lip model(s)', default=128)
+
+    parser.add_argument('--resize_factor', default=1, type=int, 
+                help='Reduce the resolution by this factor. Sometimes, best results are obtained at 480p or 720p')
+
+    parser.add_argument('--crop', nargs='+', type=int, default=[0, -1, 0, -1], 
+                        help='Crop video to a smaller region (top, bottom, left, right). Applied after resize_factor and rotate arg. ' 
+                        'Useful if multiple face present. -1 implies the value will be auto-inferred based on height, width')
+
+    parser.add_argument('--box', nargs='+', type=int, default=[-1, -1, -1, -1], 
+                        help='Specify a constant bounding box for the face. Use only as a last resort if the face is not detected.'
+                        'Also, might work only if the face is not moving around much. Syntax: (top, bottom, left, right).')
+
+    parser.add_argument('--rotate', default=False, action='store_true',
+                        help='Sometimes videos taken from a phone can be flipped 90deg. If true, will flip video right by 90deg.'
+                        'Use if you get a flipped result, despite feeding a normal looking video')
+
+    parser.add_argument('--nosmooth', default=False, action='store_true',
+                        help='Prevent smoothing face detections over a short temporal window')
+    
+    parser.add_argument('--sample_rate', default=16000, type=int, 
+                help='TTS sample_rate')
+
+    args = parser.parse_args()
+    args.img_size = 96
+
+    # 创建Amazon Polly客户端
+    import boto3
+    polly_client = boto3.Session().client('polly', region_name='us-east-1')
+
+    if os.path.isfile(args.face) and args.face.split('.')[1] in ['jpg', 'png', 'jpeg']:
+        args.static = True
+        
     main()
