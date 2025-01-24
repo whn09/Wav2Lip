@@ -63,7 +63,7 @@ args = parser.parse_args()
 args.img_size = 96
 
 # 创建Amazon Polly客户端
-polly_client = boto3.Session().client('polly')
+polly_client = boto3.Session().client('polly', region_name='us-east-1')
 
 if os.path.isfile(args.face) and args.face.split('.')[1] in ['jpg', 'png', 'jpeg']:
     args.static = True
@@ -77,11 +77,11 @@ def get_smoothened_boxes(boxes, T):
         boxes[i] = np.mean(window, axis=0)
     return boxes
 
-def face_detect(images):
+def face_detect(images, face_det_batch_size):
     detector = face_detection.FaceAlignment(face_detection.LandmarksType._2D, 
                                             flip_input=False, device=device)
 
-    batch_size = args.face_det_batch_size
+    batch_size = face_det_batch_size
     
     while 1:
         predictions = []
@@ -191,29 +191,26 @@ def load_model(path):
     model = model.to(device)
     return model.eval()
 
-HLS_SERVER = "http://HLS_SERVER_URL/upload"
+HLS_SERVER = "https://ec2-44-210-146-55.compute-1.amazonaws.com:5000/upload"
 
 def send_video(video_path):
     filename = os.path.basename(video_path)
     with open(video_path, 'rb') as f:
         files = {'file': (filename, f)}
-        response = requests.post(HLS_SERVER, files=files)
+        response = requests.post(HLS_SERVER, files=files, verify=False)
         if response.status_code == 200:
             # print(f"Successfully sent {filename} to HLS server")
             pass
         else:
             print(f"Failed to send {filename}. Status code: {response.status_code}")
 
-def main():
-    if not os.path.isfile(args.face):
+def get_faces(face, fps, resize_factor, rotate, crop, box, static, img_size, face_det_batch_size):
+    if not os.path.isfile(face):
         raise ValueError('--face argument must be a valid path to video/image file')
-
-    elif args.face.split('.')[1] in ['jpg', 'png', 'jpeg']:
-        full_frames = [cv2.imread(args.face)]
-        fps = args.fps
-
+    elif face.split('.')[1] in ['jpg', 'png', 'jpeg']:
+        full_frames = [cv2.imread(face)]
     else:
-        video_stream = cv2.VideoCapture(args.face)
+        video_stream = cv2.VideoCapture(face)
         fps = video_stream.get(cv2.CAP_PROP_FPS)
 
         # print('Reading video frames...')
@@ -224,13 +221,13 @@ def main():
             if not still_reading:
                 video_stream.release()
                 break
-            if args.resize_factor > 1:
-                frame = cv2.resize(frame, (frame.shape[1]//args.resize_factor, frame.shape[0]//args.resize_factor))
+            if resize_factor > 1:
+                frame = cv2.resize(frame, (frame.shape[1]//resize_factor, frame.shape[0]//resize_factor))
 
-            if args.rotate:
+            if rotate:
                 frame = cv2.rotate(frame, cv2.cv2.ROTATE_90_CLOCKWISE)
 
-            y1, y2, x1, x2 = args.crop
+            y1, y2, x1, x2 = crop
             if x2 == -1: x2 = frame.shape[1]
             if y2 == -1: y2 = frame.shape[0]
 
@@ -240,17 +237,181 @@ def main():
 
     # print ("Number of frames available for inference: "+str(len(full_frames)))
 
-    if args.box[0] == -1:
-        if not args.static:
-            face_det_results = face_detect(full_frames) # BGR2RGB for CNN face detection
+    if box[0] == -1:
+        if not static:
+            face_det_results = face_detect(full_frames, face_det_batch_size) # BGR2RGB for CNN face detection
         else:
-            face_det_results = face_detect([full_frames[0]])
+            face_det_results = face_detect([full_frames[0]], face_det_batch_size)
     else:
         print('Using the specified bounding box instead of face detection...')
-        y1, y2, x1, x2 = args.box
+        y1, y2, x1, x2 = box
         face_det_results = [[f[y1: y2, x1:x2], (y1, y2, x1, x2)] for f in full_frames]
     for i in range(len(face_det_results)):
-        face_det_results[i][0] = cv2.resize(face_det_results[i][0], (args.img_size, args.img_size))
+        face_det_results[i][0] = cv2.resize(face_det_results[i][0], (img_size, img_size))
+        
+    return full_frames, face_det_results
+
+def process_chunk(model, full_frames, face_det_results, chunk_array, chunk_num, prefix, fps, wav2lip_batch_size):
+    # 将 PCM 数据范围从 [-32768, 32767] 转换为 [-1.0, 1.0]
+    chunk_array /= 32768.0
+    wav = chunk_array
+    mel = audio.melspectrogram(wav)
+    # print('mel.shape:', mel.shape)
+
+    temp_wav_filename = 'temp/'+prefix+'_chunk_{}.wav'.format(chunk_num)
+    audio.save_wav(chunk_array, temp_wav_filename, 16000)
+
+# # 将 PCM 数据转换为 numpy 数组
+# pcm_array = np.frombuffer(pcm_data, dtype=np.int16).astype(np.float32)
+# # 将 PCM 数据范围从 [-32768, 32767] 转换为 [-1.0, 1.0]
+# pcm_array /= 32768.0
+
+# audio.save_wav(chunk_array, 'temp/output.wav', 16000)
+
+# # wav = audio.load_wav('temp/output.wav', 16000)
+# wav = pcm_array
+# mel = audio.melspectrogram(wav)
+# print('mel.shape:', mel.shape)
+
+    if np.isnan(mel.reshape(-1)).sum() > 0:
+        raise ValueError('Mel contains nan! Using a TTS voice? Add a small epsilon noise to the wav file and try again')
+
+    mel_chunks = []
+    mel_idx_multiplier = 80./fps 
+    i = 0
+    while 1:
+        start_idx = int(i * mel_idx_multiplier)
+        if start_idx + mel_step_size > len(mel[0]):
+            mel_chunks.append(mel[:, len(mel[0]) - mel_step_size:])
+            break
+        mel_chunks.append(mel[:, start_idx : start_idx + mel_step_size])
+        i += 1
+
+    # print("Length of mel chunks: {}".format(len(mel_chunks)))
+
+    if len(mel_chunks) < 2:  # TODO pcm_stream.read(6096)的时候，len(mel_chunks)应该等于2，后面的程序运行都正常，但是最后一点语音可能不到2，导致后面的程序运行失败
+        return None
+
+    sub_frames = full_frames[:len(mel_chunks)]  # TODO 暂时每个chunk只取full_frames的前一些帧，而不是顺序取
+    sub_face_det_results = face_det_results[:len(mel_chunks)]
+
+    batch_size = wav2lip_batch_size
+    gen = datagen(sub_frames.copy(), sub_face_det_results.copy(), mel_chunks)
+
+    frame_h, frame_w = sub_frames[0].shape[:-1]
+    temp_avi_filename = 'temp/'+prefix+'_chunk_{}.avi'.format(chunk_num)
+    # out = cv2.VideoWriter('temp/result.avi', cv2.VideoWriter_fourcc(*'DIVX'), fps, (frame_w, frame_h))
+    out = cv2.VideoWriter(temp_avi_filename, cv2.VideoWriter_fourcc(*'DIVX'), fps, (frame_w, frame_h))
+
+    start_time = time.time()
+    avg_time = 0
+    num_batches = 0
+    num_frames = 0
+    for i, (img_batch, mel_batch, frames, coords) in enumerate(tqdm(gen, 
+                                            total=int(np.ceil(float(len(mel_chunks))/batch_size)))):
+    # for i, (img_batch, mel_batch, frames, coords) in enumerate(gen):
+        start = time.time()
+        img_batch = torch.FloatTensor(np.transpose(img_batch, (0, 3, 1, 2))).to(device)
+        mel_batch = torch.FloatTensor(np.transpose(mel_batch, (0, 3, 1, 2))).to(device)
+        # print('img_batch:', img_batch.shape, 'mel_batch:', mel_batch.shape)  # img_batch: torch.Size([1, 6, 96, 96]) mel_batch: torch.Size([1, 1, 80, 16])
+
+        with torch.no_grad():
+            pred = model(mel_batch, img_batch)
+
+        pred = pred.cpu().numpy().transpose(0, 2, 3, 1) * 255.
+        
+        for p, f, c in zip(pred, frames, coords):
+            y1, y2, x1, x2 = c
+            p = cv2.resize(p.astype(np.uint8), (x2 - x1, y2 - y1))
+
+            f[y1:y2, x1:x2] = p
+            out.write(f)
+            num_frames += 1
+        end = time.time()
+        avg_time += end-start
+        num_batches += 1
+
+    out.release()
+    end_time = time.time()
+    print('Wav2Lip inference time:', end_time-start_time)
+    # print('Wav2Lip inference avg_time:', avg_time/num_batches)
+    # print('num_batches:', num_batches)
+    # print('*'*20)
+    # print('num_frames:', num_frames)
+    # print('#'*20)
+
+    # # 方法1：把wav和avi直接推送到rtmp，但是有问题，可能中间突然断掉
+    # rtmp_command = 'ffmpeg -re -i {} -i {} -vcodec h264 -vprofile baseline -acodec aac -ar 16000 -ac 1 -f flv -s 480x636 -flvflags no_duration_filesize {}'.format(temp_wav_filename, temp_avi_filename, args.rtmp_server)  # -loglevel quiet
+    # subprocess.call(rtmp_command, shell=platform.system() != 'Windows')
+
+    # # 方法2：先把wav和avi合成mp4，再推送到rtmp，但是有问题，可能中间突然断掉
+    # out_mp4_filename = args.outfile[:-4]+'_chunk_'+str(chunk_num)+args.outfile[-4:]
+    # command = 'ffmpeg -y -i {} -i {} -strict -2 -q:v 1 {} -loglevel quiet'.format(temp_wav_filename, temp_avi_filename, out_mp4_filename)
+    # ffprobe_command = 'ffprobe '+out_mp4_filename
+    # rtmp_command = 'ffmpeg -re -i {} -vcodec h264 -vprofile baseline -acodec aac -ar 16000 -ac 1 -f flv -s 480x636 {}'.format(out_mp4_filename, args.rtmp_server)  # -loglevel quiet
+    # subprocess.call(command + ' && ' + ffprobe_command + ' && ' + rtmp_command, shell=platform.system() != 'Windows')
+    
+    ffmpeg_start = time.time()
+    # 方法3：先把wav和avi合成mp4
+    out_mp4_filename = prefix+'_chunk_'+str(chunk_num)+'.mp4'
+    command = 'ffmpeg -y -i {} -i {} -strict -2 -q:v 1 {} -loglevel quiet'.format(temp_wav_filename, temp_avi_filename, out_mp4_filename)
+    # subprocess.call(command, shell=platform.system() != 'Windows')
+    os.system(command)
+    ffmpeg_end = time.time()
+    print('ffmpeg time:', ffmpeg_end-ffmpeg_start)
+
+    # command = 'ffprobe '+temp_wav_filename
+    # subprocess.call(command, shell=platform.system() != 'Windows')
+
+    # command = 'ffprobe '+temp_avi_filename
+    # subprocess.call(command, shell=platform.system() != 'Windows')
+    
+#         # 方法3-1：固定文件列表模式，但是有问题，由于一开始就要所有文件，推送会找不到文件
+#         if chunk_num == 0:
+#             with open('filelist.txt', 'w') as fout:
+#                 for i in range(70):
+#                     out_mp4_filename_i = args.outfile[:-4]+'_chunk_'+str(i)+args.outfile[-4:]
+#                     fout.write('file \'{}\'\n'.format(out_mp4_filename_i))
+            
+#             rtmp_command = 'ffmpeg -f concat -safe 0 -i filelist.txt -vcodec h264 -vprofile baseline -acodec aac -ar 16000 -strict -2 -ac 1 -f flv -s 480x636 -flvflags no_duration_filesize -q 25 {}'.format(args.rtmp_server)
+#             subprocess.call(rtmp_command, shell=platform.system() != 'Windows')
+        
+    # # 方法3-2：动态扩展文件列表模式，但是有问题，每次会重新播放
+    # with open('filelist.txt', 'a') as fout:
+    #     fout.write('file \'{}\'\n'.format(out_mp4_filename))
+    # rtmp_command = 'ffmpeg -f concat -safe 0 -i filelist.txt -vcodec h264 -vprofile baseline -acodec aac -ar 16000 -strict -2 -ac 1 -f flv -s 480x636 -flvflags no_duration_filesize -q 25 {}'.format(args.rtmp_server)
+    # subprocess.call(rtmp_command, shell=platform.system() != 'Windows')
+    
+    # # 方法3-3：动态扩展文件到concat_url，但是有问题，每次会重新播放
+    # if chunk_num == 0:
+    #     concat_url += out_mp4_filename
+    # else:
+    #     concat_url += '|'+out_mp4_filename
+    # rtmp_command = f'ffmpeg -re -i "{concat_url}" -vcodec h264 -vprofile baseline -acodec aac -ar 16000 -strict -2 -ac 1 -f flv -s 480x636 -flvflags no_duration_filesize -q 25 {args.rtmp_server}'
+    # print('rtmp_command:', rtmp_command)
+    # subprocess.call(rtmp_command, shell=platform.system() != 'Windows')
+    
+#         # 方法3-4：固定文件列表模式，但是有问题，由于一开始就要所有文件，推送会找不到文件
+#         if chunk_num == 0:
+#             out_mp4_filenames = []
+#             for i in range(70):
+#                 out_mp4_filename_i = args.outfile[:-4]+'_chunk_'+str(i)+args.outfile[-4:]
+#                 out_mp4_filenames.append(out_mp4_filename_i)
+            
+#             concat_url += '|'.join(out_mp4_filenames)
+#             rtmp_command = f'ffmpeg -re -i "{concat_url}" -vcodec h264 -vprofile baseline -acodec aac -ar 16000 -strict -2 -ac 1 -f flv -s 480x636 -flvflags no_duration_filesize -q 25 {args.rtmp_server}'
+#             print('rtmp_command:', rtmp_command)
+#             subprocess.call(rtmp_command, shell=platform.system() != 'Windows')
+
+    # 方法4：使用HLS
+    send_start = time.time()
+    send_video(out_mp4_filename)
+    send_end = time.time()
+    print('send time:', send_end-send_start)
+    return out_mp4_filename
+
+def main():
+    full_frames, face_det_results = get_faces(args.face, args.fps, args.resize_factor, args.rotate, args.crop, args.box, args.static, args.img_size, args.face_det_batch_size)
 
     # if not args.audio.endswith('.wav'):
     #     print('Extracting raw audio...')
@@ -282,162 +443,10 @@ def main():
 
         # 将 PCM 数据转换为 numpy 数组
         chunk_array = np.frombuffer(chunk, dtype=np.int16).astype(np.float32)
-        # 将 PCM 数据范围从 [-32768, 32767] 转换为 [-1.0, 1.0]
-        chunk_array /= 32768.0
-        wav = chunk_array
-        mel = audio.melspectrogram(wav)
-        # print('mel.shape:', mel.shape)
-
-        temp_wav_filename = 'temp/'+args.outfile.split('/')[-1][:-4]+'_chunk_{}.wav'.format(chunk_num)
-        audio.save_wav(chunk_array, temp_wav_filename, 16000)
-    
-    # # 将 PCM 数据转换为 numpy 数组
-    # pcm_array = np.frombuffer(pcm_data, dtype=np.int16).astype(np.float32)
-    # # 将 PCM 数据范围从 [-32768, 32767] 转换为 [-1.0, 1.0]
-    # pcm_array /= 32768.0
-
-    # audio.save_wav(chunk_array, 'temp/output.wav', 16000)
-
-    # # wav = audio.load_wav('temp/output.wav', 16000)
-    # wav = pcm_array
-    # mel = audio.melspectrogram(wav)
-    # print('mel.shape:', mel.shape)
-
-        if np.isnan(mel.reshape(-1)).sum() > 0:
-            raise ValueError('Mel contains nan! Using a TTS voice? Add a small epsilon noise to the wav file and try again')
-
-        mel_chunks = []
-        mel_idx_multiplier = 80./fps 
-        i = 0
-        while 1:
-            start_idx = int(i * mel_idx_multiplier)
-            if start_idx + mel_step_size > len(mel[0]):
-                mel_chunks.append(mel[:, len(mel[0]) - mel_step_size:])
-                break
-            mel_chunks.append(mel[:, start_idx : start_idx + mel_step_size])
-            i += 1
-
-        # print("Length of mel chunks: {}".format(len(mel_chunks)))
-
-        if len(mel_chunks) < 2:  # TODO pcm_stream.read(6096)的时候，len(mel_chunks)应该等于2，后面的程序运行都正常，但是最后一点语音可能不到2，导致后面的程序运行失败
+        
+        out_mp4_filename = process_chunk(model, full_frames, face_det_results, chunk_array, chunk_num, prefix=args.outfile.split('/')[-1][:-4], fps=args.fps, wav2lip_batch_size=args.wav2lip_batch_size)
+        if out_mp4_filename is None:
             break
-
-        sub_frames = full_frames[:len(mel_chunks)]  # TODO 暂时每个chunk只取full_frames的前一些帧，而不是顺序取
-        sub_face_det_results = face_det_results[:len(mel_chunks)]
-
-        batch_size = args.wav2lip_batch_size
-        gen = datagen(sub_frames.copy(), sub_face_det_results.copy(), mel_chunks)
-
-        frame_h, frame_w = sub_frames[0].shape[:-1]
-        temp_avi_filename = 'temp/'+args.outfile.split('/')[-1][:-4]+'_chunk_{}.avi'.format(chunk_num)
-        # out = cv2.VideoWriter('temp/result.avi', cv2.VideoWriter_fourcc(*'DIVX'), fps, (frame_w, frame_h))
-        out = cv2.VideoWriter(temp_avi_filename, cv2.VideoWriter_fourcc(*'DIVX'), fps, (frame_w, frame_h))
-
-        start_time = time.time()
-        avg_time = 0
-        num_batches = 0
-        num_frames = 0
-        for i, (img_batch, mel_batch, frames, coords) in enumerate(tqdm(gen, 
-                                                total=int(np.ceil(float(len(mel_chunks))/batch_size)))):
-        # for i, (img_batch, mel_batch, frames, coords) in enumerate(gen):
-            start = time.time()
-            img_batch = torch.FloatTensor(np.transpose(img_batch, (0, 3, 1, 2))).to(device)
-            mel_batch = torch.FloatTensor(np.transpose(mel_batch, (0, 3, 1, 2))).to(device)
-            # print('img_batch:', img_batch.shape, 'mel_batch:', mel_batch.shape)  # img_batch: torch.Size([1, 6, 96, 96]) mel_batch: torch.Size([1, 1, 80, 16])
-
-            with torch.no_grad():
-                pred = model(mel_batch, img_batch)
-
-            pred = pred.cpu().numpy().transpose(0, 2, 3, 1) * 255.
-            
-            for p, f, c in zip(pred, frames, coords):
-                y1, y2, x1, x2 = c
-                p = cv2.resize(p.astype(np.uint8), (x2 - x1, y2 - y1))
-
-                f[y1:y2, x1:x2] = p
-                out.write(f)
-                num_frames += 1
-            end = time.time()
-            avg_time += end-start
-            num_batches += 1
-
-        out.release()
-        end_time = time.time()
-        print('Wav2Lip inference time:', end_time-start_time)
-        # print('Wav2Lip inference avg_time:', avg_time/num_batches)
-        # print('num_batches:', num_batches)
-        # print('*'*20)
-        # print('num_frames:', num_frames)
-        # print('#'*20)
-
-        # # 方法1：把wav和avi直接推送到rtmp，但是有问题，可能中间突然断掉
-        # rtmp_command = 'ffmpeg -re -i {} -i {} -vcodec h264 -vprofile baseline -acodec aac -ar 16000 -ac 1 -f flv -s 480x636 -flvflags no_duration_filesize {}'.format(temp_wav_filename, temp_avi_filename, args.rtmp_server)  # -loglevel quiet
-        # subprocess.call(rtmp_command, shell=platform.system() != 'Windows')
-
-        # # 方法2：先把wav和avi合成mp4，再推送到rtmp，但是有问题，可能中间突然断掉
-        # out_mp4_filename = args.outfile[:-4]+'_chunk_'+str(chunk_num)+args.outfile[-4:]
-        # command = 'ffmpeg -y -i {} -i {} -strict -2 -q:v 1 {} -loglevel quiet'.format(temp_wav_filename, temp_avi_filename, out_mp4_filename)
-        # ffprobe_command = 'ffprobe '+out_mp4_filename
-        # rtmp_command = 'ffmpeg -re -i {} -vcodec h264 -vprofile baseline -acodec aac -ar 16000 -ac 1 -f flv -s 480x636 {}'.format(out_mp4_filename, args.rtmp_server)  # -loglevel quiet
-        # subprocess.call(command + ' && ' + ffprobe_command + ' && ' + rtmp_command, shell=platform.system() != 'Windows')
-        
-        ffmpeg_start = time.time()
-        # 方法3：先把wav和avi合成mp4
-        out_mp4_filename = args.outfile[:-4]+'_chunk_'+str(chunk_num)+args.outfile[-4:]
-        command = 'ffmpeg -y -i {} -i {} -strict -2 -q:v 1 {} -loglevel quiet'.format(temp_wav_filename, temp_avi_filename, out_mp4_filename)
-        # subprocess.call(command, shell=platform.system() != 'Windows')
-        os.system(command)
-        ffmpeg_end = time.time()
-        print('ffmpeg time:', ffmpeg_end-ffmpeg_start)
-
-        # command = 'ffprobe '+temp_wav_filename
-        # subprocess.call(command, shell=platform.system() != 'Windows')
-
-        # command = 'ffprobe '+temp_avi_filename
-        # subprocess.call(command, shell=platform.system() != 'Windows')
-        
-#         # 方法3-1：固定文件列表模式，但是有问题，由于一开始就要所有文件，推送会找不到文件
-#         if chunk_num == 0:
-#             with open('filelist.txt', 'w') as fout:
-#                 for i in range(70):
-#                     out_mp4_filename_i = args.outfile[:-4]+'_chunk_'+str(i)+args.outfile[-4:]
-#                     fout.write('file \'{}\'\n'.format(out_mp4_filename_i))
-                
-#             rtmp_command = 'ffmpeg -f concat -safe 0 -i filelist.txt -vcodec h264 -vprofile baseline -acodec aac -ar 16000 -strict -2 -ac 1 -f flv -s 480x636 -flvflags no_duration_filesize -q 25 {}'.format(args.rtmp_server)
-#             subprocess.call(rtmp_command, shell=platform.system() != 'Windows')
-            
-        # # 方法3-2：动态扩展文件列表模式，但是有问题，每次会重新播放
-        # with open('filelist.txt', 'a') as fout:
-        #     fout.write('file \'{}\'\n'.format(out_mp4_filename))
-        # rtmp_command = 'ffmpeg -f concat -safe 0 -i filelist.txt -vcodec h264 -vprofile baseline -acodec aac -ar 16000 -strict -2 -ac 1 -f flv -s 480x636 -flvflags no_duration_filesize -q 25 {}'.format(args.rtmp_server)
-        # subprocess.call(rtmp_command, shell=platform.system() != 'Windows')
-        
-        # # 方法3-3：动态扩展文件到concat_url，但是有问题，每次会重新播放
-        # if chunk_num == 0:
-        #     concat_url += out_mp4_filename
-        # else:
-        #     concat_url += '|'+out_mp4_filename
-        # rtmp_command = f'ffmpeg -re -i "{concat_url}" -vcodec h264 -vprofile baseline -acodec aac -ar 16000 -strict -2 -ac 1 -f flv -s 480x636 -flvflags no_duration_filesize -q 25 {args.rtmp_server}'
-        # print('rtmp_command:', rtmp_command)
-        # subprocess.call(rtmp_command, shell=platform.system() != 'Windows')
-        
-#         # 方法3-4：固定文件列表模式，但是有问题，由于一开始就要所有文件，推送会找不到文件
-#         if chunk_num == 0:
-#             out_mp4_filenames = []
-#             for i in range(70):
-#                 out_mp4_filename_i = args.outfile[:-4]+'_chunk_'+str(i)+args.outfile[-4:]
-#                 out_mp4_filenames.append(out_mp4_filename_i)
-                
-#             concat_url += '|'.join(out_mp4_filenames)
-#             rtmp_command = f'ffmpeg -re -i "{concat_url}" -vcodec h264 -vprofile baseline -acodec aac -ar 16000 -strict -2 -ac 1 -f flv -s 480x636 -flvflags no_duration_filesize -q 25 {args.rtmp_server}'
-#             print('rtmp_command:', rtmp_command)
-#             subprocess.call(rtmp_command, shell=platform.system() != 'Windows')
-
-        # 方法4：使用HLS
-        send_start = time.time()
-        send_video(out_mp4_filename)
-        send_end = time.time()
-        print('send time:', send_end-send_start)
 
         chunk_num += 1
     all_end_time = time.time()
