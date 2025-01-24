@@ -109,7 +109,7 @@ def datagen(frames, face_det_results, mels, static, wav2lip_batch_size, img_size
 
         yield img_batch, mel_batch, frame_batch, coords_batch
 
-mel_step_size = 16
+# mel_step_size = 16
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 # print('Using {} for inference.'.format(device))
 
@@ -194,7 +194,7 @@ def get_faces(face, fps, resize_factor, rotate, crop, box, static, img_size, fac
         
     return full_frames, face_det_results
 
-def process_chunk(model, full_frames, face_det_results, chunk_array, chunk_num, prefix, fps, wav2lip_batch_size, static, img_size, sample_rate):
+def process_chunk(model, full_frames, face_det_results, chunk_array, chunk_num, prefix, fps, wav2lip_batch_size, static, img_size, sample_rate, mel_step_size):
     # 将 PCM 数据范围从 [-32768, 32767] 转换为 [-1.0, 1.0]
     chunk_array /= 32768.0
     wav = chunk_array
@@ -387,7 +387,7 @@ def main():
         # 将 PCM 数据转换为 numpy 数组
         chunk_array = np.frombuffer(chunk, dtype=np.int16).astype(np.float32)
         
-        out_mp4_filename = process_chunk(model, full_frames, face_det_results, chunk_array, chunk_num, prefix=args.outfile.split('/')[-1][:-4], fps=args.fps, wav2lip_batch_size=args.wav2lip_batch_size, static=args.static, img_size=args.img_size, sample_rate=args.sample_rate)
+        out_mp4_filename = process_chunk(model, full_frames, face_det_results, chunk_array, chunk_num, prefix=args.outfile.split('/')[-1][:-4], fps=args.fps, wav2lip_batch_size=args.wav2lip_batch_size, static=args.static, img_size=args.img_size, sample_rate=args.sample_rate, mel_step_size=args.mel_step_size)
         if out_mp4_filename is None:
             break
 
@@ -445,6 +445,8 @@ if __name__ == '__main__':
     
     parser.add_argument('--sample_rate', default=16000, type=int, 
                 help='TTS sample_rate')
+    parser.add_argument('--mel_step_size', default=16, type=int, 
+                help='Mel Step Size')
 
     args = parser.parse_args()
     args.img_size = 96
