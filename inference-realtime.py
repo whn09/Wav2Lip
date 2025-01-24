@@ -29,8 +29,8 @@ def face_detect(images, face_det_batch_size, pads, nosmooth):
     while 1:
         predictions = []
         try:
-            for i in tqdm(range(0, len(images), batch_size)):
-            # for i in range(0, len(images), batch_size):
+            # for i in tqdm(range(0, len(images), batch_size)):
+            for i in range(0, len(images), batch_size):
                 predictions.extend(detector.get_detections_for_batch(np.array(images[i:i + batch_size])))
         except RuntimeError:
             if batch_size == 1: 
@@ -250,9 +250,9 @@ def process_chunk(model, full_frames, face_det_results, chunk_array, chunk_num, 
     avg_time = 0
     num_batches = 0
     num_frames = 0
-    for i, (img_batch, mel_batch, frames, coords) in enumerate(tqdm(gen, 
-                                            total=int(np.ceil(float(len(mel_chunks))/batch_size)))):
-    # for i, (img_batch, mel_batch, frames, coords) in enumerate(gen):
+    # for i, (img_batch, mel_batch, frames, coords) in enumerate(tqdm(gen, 
+    #                                         total=int(np.ceil(float(len(mel_chunks))/batch_size)))):
+    for i, (img_batch, mel_batch, frames, coords) in enumerate(gen):
         start = time.time()
         img_batch = torch.FloatTensor(np.transpose(img_batch, (0, 3, 1, 2))).to(device)
         mel_batch = torch.FloatTensor(np.transpose(mel_batch, (0, 3, 1, 2))).to(device)
